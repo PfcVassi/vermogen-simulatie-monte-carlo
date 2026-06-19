@@ -4,6 +4,7 @@ Streamlit dashboard — Vermogenscalculator (Monte Carlo).
 
 from __future__ import annotations
 
+import re
 import uuid
 from copy import deepcopy
 
@@ -11,7 +12,15 @@ import numpy as np
 import streamlit as st
 
 from chart_builder import SPAGHETTI_RUNS, build_results_chart, phase_x_ranges, x_values, yearly_indices
-from scenario_storage import delete_scenario, list_scenarios, load_scenario, save_scenario
+from scenario_storage import (
+    ScenarioImportError,
+    delete_scenario,
+    export_scenario_to_json,
+    import_scenario_from_json,
+    list_scenarios,
+    load_scenario,
+    save_scenario,
+)
 from simulation_engine import (
     CONTRIBUTION_FREQUENCIES,
     PhaseConfig,
@@ -31,6 +40,19 @@ from ui_theme import (
 )
 
 APP_SUBTITLE = "Monte Carlo simulatie · PfcVassi"
+
+st.set_page_config(
+    page_title="Vermogenscalculator",
+    layout="wide",
+    initial_sidebar_state="collapsed",
+)
+
+
+def safe_download_filename(name: str) -> str:
+    """Converteer scenarionaam naar veilige bestandsnaam (bijv. mijn_pensioen_plan.json)."""
+    base = name.strip().lower().replace(" ", "_")
+    base = re.sub(r"[^\w_-]", "", base).strip("_")
+    return f"{base or 'scenario'}.json"
 
 
 def render_header() -> None:
@@ -83,7 +105,30 @@ def _new_phase(**overrides) -> dict:
 
 def init_session_state() -> None:
     if st.session_state.get("pending_scenario_id"):
-        _apply_scenario(load_scenario(st.session_state.pop("pending_scenario_id")))
+        scenario_id = st.session_state.pop("pending_scenario_id")
+        try:
+            _apply_scenario(load_scenario(scenario_id))
+            st.session_state.scenario_import_message = (
+                "success",
+                f"Scenario '{st.session_state.scenario_name}' geladen.",
+            )
+        except (ScenarioImportError, FileNotFoundError, OSError) as exc:
+            st.session_state.scenario_import_message = ("error", str(exc))
+    if st.session_state.get("pending_scenario_upload"):
+        raw = st.session_state.pop("pending_scenario_upload")
+        try:
+            _apply_scenario(import_scenario_from_json(raw))
+            st.session_state.scenario_import_message = (
+                "success",
+                f"Scenario '{st.session_state.scenario_name}' geladen uit JSON.",
+            )
+        except ScenarioImportError as exc:
+            st.session_state.scenario_import_message = ("error", str(exc))
+        except Exception as exc:
+            st.session_state.scenario_import_message = (
+                "error",
+                f"Import mislukt: {exc}",
+            )
     if "phases" not in st.session_state:
         st.session_state.phases = [_new_phase()]
     st.session_state.setdefault("tax_mode", TAX_MODES[0])
@@ -94,6 +139,10 @@ def init_session_state() -> None:
     st.session_state.setdefault("goal_amount", 500_000)
     st.session_state.setdefault("inflation_pct", 2.0)
     st.session_state.setdefault("n_runs", 10_000)
+    st.session_state.setdefault(
+        "scenario_naam_download",
+        st.session_state.get("scenario_name", "Basis scenario"),
+    )
 
 
 def _scenario_payload() -> dict:
@@ -128,9 +177,46 @@ def _apply_scenario(data: dict) -> None:
 
 def render_scenario_panel() -> None:
     with st.expander("Scenario's opslaan & laden"):
-        st.caption("Lokaal opgeslagen in `.scenarios/` (niet in git).")
+        msg = st.session_state.pop("scenario_import_message", None)
+        if msg:
+            level, text = msg
+            if level == "success":
+                st.success(text)
+            else:
+                st.error(text)
 
-        if st.button("Huidig scenario opslaan", type="primary", use_container_width=True):
+        st.markdown("**Permanent bewaren op je eigen computer**")
+        scenario_naam_input = st.text_input(
+            "Naam van dit scenario voor het bestand:",
+            key="scenario_naam_download",
+        )
+        st.download_button(
+            label="💾 Sla scenario op als bestand",
+            data=export_scenario_to_json(_scenario_payload()),
+            file_name=safe_download_filename(scenario_naam_input),
+            mime="application/json",
+            type="primary",
+            use_container_width=True,
+        )
+        uploaded = st.file_uploader(
+            "Laad een eerder opgeslagen bestand",
+            type=["json"],
+            key="scenario_json_uploader",
+        )
+        st.caption("Je data blijft 100% van jou. Er wordt niets op een centrale server opgeslagen.")
+        if uploaded is not None and st.button(
+            "Importeer JSON-bestand",
+            key="import_json_btn",
+            use_container_width=True,
+        ):
+            st.session_state.pending_scenario_upload = uploaded.getvalue()
+            st.rerun()
+
+        st.divider()
+        st.markdown("**Tijdelijk opslaan (blijft hooguit enkele dagen behouden)**")
+        st.caption("Opgeslagen in `.scenarios/` (niet in git).")
+
+        if st.button("Snel opslaan voor deze sessie", type="primary", use_container_width=True):
             try:
                 save_scenario(_scenario_payload())
                 st.success(f"Scenario '{st.session_state.scenario_name}' opgeslagen.")
@@ -379,127 +465,130 @@ def render_phase_editor(index: int, phase: dict, total: int) -> None:
 
 
 def main() -> None:
-    st.set_page_config(page_title="Vermogenscalculator", layout="wide", initial_sidebar_state="collapsed")
-    inject_css()
-    init_session_state()
-    render_header()
+    try:
+        inject_css()
+        init_session_state()
+        render_header()
 
-    plan_col, main_col = st.columns([1, 2.3], gap="medium")
+        plan_col, main_col = st.columns([1, 2.3], gap="medium")
 
-    with plan_col:
-        st.markdown('<div class="plan-col-marker"></div>', unsafe_allow_html=True)
-        st.markdown('<p class="section-label">Planning</p>', unsafe_allow_html=True)
+        with plan_col:
+            st.markdown('<div class="plan-col-marker"></div>', unsafe_allow_html=True)
+            st.markdown('<p class="section-label">Planning</p>', unsafe_allow_html=True)
 
-        with st.expander("Algemeen", expanded=True):
-            st.caption("Box 3 belasting")
-            tax_mode = st.radio(
-                "Box 3 belasting",
-                TAX_MODES,
-                horizontal=True,
-                label_visibility="collapsed",
-                key="tax_mode",
-            )
-            fiscaal_partner = st.toggle("Fiscaal partner", key="fiscaal_partner")
-            scenario_name = st.text_input("Scenario", key="scenario_name")
-            start_capital = st.number_input(
-                "Startkapitaal (€)", 0, 50_000_000, step=1_000, format="%d",
-                key="start_capital",
-            )
-            goal_label = st.text_input(
-                "Doel (optioneel)",
-                help="Vrij veld: bijv. pensioen, nalatenschap, studie kinderen.",
-                key="goal_label",
-            )
-            goal_amount = st.number_input(
-                "Streefbedrag einddatum (€)",
-                min_value=0,
-                max_value=50_000_000,
-                step=10_000,
-                format="%d",
-                help="Slagingskans = % runs waarbij je eindvermogen dit bedrag haalt of overschrijdt.",
-                key="goal_amount",
-            )
-            inflation_pct = st.slider("Inflatie (%)", 0.0, 10.0, step=0.5, key="inflation_pct")
-            n_runs = st.select_slider("Runs", [1_000, 2_500, 5_000, 10_000], key="n_runs")
+            with st.expander("Algemeen", expanded=True):
+                st.caption("Box 3 belasting")
+                tax_mode = st.radio(
+                    "Box 3 belasting",
+                    TAX_MODES,
+                    horizontal=True,
+                    label_visibility="collapsed",
+                    key="tax_mode",
+                )
+                fiscaal_partner = st.toggle("Fiscaal partner", key="fiscaal_partner")
+                scenario_name = st.text_input("Scenario", key="scenario_name")
+                start_capital = st.number_input(
+                    "Startkapitaal (€)", 0, 1_000_000_000, step=1_000, format="%d",
+                    key="start_capital",
+                )
+                goal_label = st.text_input(
+                    "Doel (optioneel)",
+                    help="Vrij veld: bijv. pensioen, nalatenschap, studie kinderen.",
+                    key="goal_label",
+                )
+                goal_amount = st.number_input(
+                    "Streefbedrag einddatum (€)",
+                    min_value=0,
+                    max_value=50_000_000,
+                    step=10_000,
+                    format="%d",
+                    help="Slagingskans = % runs waarbij je eindvermogen dit bedrag haalt of overschrijdt.",
+                    key="goal_amount",
+                )
+                inflation_pct = st.slider("Inflatie (%)", 0.0, 10.0, step=0.5, key="inflation_pct")
+                n_runs = st.select_slider("Runs", [1_000, 2_500, 5_000, 10_000], key="n_runs")
 
-        horizon = sum(int(p["years"]) for p in st.session_state.phases)
-        st.caption(f"Horizon: **{horizon} jaar** · {len(st.session_state.phases)} fase(s)")
+            horizon = sum(int(p["years"]) for p in st.session_state.phases)
+            st.caption(f"Horizon: **{horizon} jaar** · {len(st.session_state.phases)} fase(s)")
 
-        st.markdown('<p class="section-label">Fasen</p>', unsafe_allow_html=True)
-        for i, phase in enumerate(list(st.session_state.phases)):
-            render_phase_editor(i, phase, len(st.session_state.phases))
+            st.markdown('<p class="section-label">Fasen</p>', unsafe_allow_html=True)
+            for i, phase in enumerate(list(st.session_state.phases)):
+                render_phase_editor(i, phase, len(st.session_state.phases))
 
-        if st.button("➕ Fase toevoegen", type="primary", use_container_width=True):
-            st.session_state.phases.append(_new_phase(name=f"fase {len(st.session_state.phases) + 1}"))
-            st.rerun()
+            if st.button("➕ Fase toevoegen", type="primary", use_container_width=True):
+                st.session_state.phases.append(_new_phase(name=f"fase {len(st.session_state.phases) + 1}"))
+                st.rerun()
 
-    config = phases_to_config(
-        n_runs, start_capital, inflation_pct, st.session_state.phases, fiscaal_partner,
-    )
-
-    with st.spinner("Berekenen…"):
-        result = cached_simulation(config)
-
-    p10, p50, p90, _, total_tax, end_values = _paths_for_tax_mode(result, tax_mode)
-    slagingskans, success_count = success_rate_goal(end_values, float(goal_amount))
-    end_value = float(p50[-1])
-    rendement = (
-        end_value - config.start_capital
-        - result["total_ingelegd"] + result["total_opgenomen"] + total_tax
-    )
-    goal_short = goal_label.strip() or "streefbedrag"
-
-    with main_col:
-        k1, k2, k3, k4, k5 = st.columns(5)
-        with k1:
-            st.markdown(kpi_card("Ingelegd", format_euro(result["total_ingelegd"])), unsafe_allow_html=True)
-        with k2:
-            st.markdown(kpi_card("Opgenomen", format_euro(result["total_opgenomen"])), unsafe_allow_html=True)
-        with k3:
-            st.markdown(kpi_card("Rendement", format_euro(rendement), "positive" if rendement >= 0 else "negative"), unsafe_allow_html=True)
-        with k4:
-            st.markdown(kpi_card("Box 3", format_euro(-total_tax), "negative"), unsafe_allow_html=True)
-        with k5:
-            st.markdown(
-                kpi_card("Eindwaarde P50", format_euro(end_value), "positive" if end_value >= 0 else "negative"),
-                unsafe_allow_html=True,
-            )
-
-        with st.container(border=True):
-            h1, h2 = st.columns([3, 1])
-            with h1:
-                st.markdown("**Resultaten**")
-                st.markdown(chart_legend_html(), unsafe_allow_html=True)
-            with h2:
-                x_mode = st.radio("X-as", X_AXIS_MODES, horizontal=True, label_visibility="collapsed")
-
-            fig, chart_note = build_chart(result, config, tax_mode, x_mode, float(goal_amount))
-            st.plotly_chart(fig, use_container_width=True)
-            if chart_note:
-                st.caption(chart_note)
-
-            rate_text = format_success_rate(slagingskans, success_count, config.n_runs)
-            st.markdown(
-                f'<div class="success-rate">'
-                f'<span style="color:{COLORS["muted"]};font-size:0.82rem">'
-                f'Slagingskans ({goal_short} ≥ {format_euro(goal_amount, compact=False)})</span>'
-                f'<div class="success-rate-value">{rate_text}</div>'
-                f'<span style="color:{COLORS["muted"]};font-size:0.78rem">'
-                f'{success_count:,} van {config.n_runs:,} runs halen het streefbedrag</span></div>',
-                unsafe_allow_html=True,
-            )
-            st.caption(
-                f"{result['start_year']}–{result['start_year'] + config.horizon_years - 1} · "
-                f"P10 {format_euro(p10[-1])} · P50 {format_euro(p50[-1])} · P90 {format_euro(p90[-1])}"
-            )
-
-        render_explanation(
-            config.horizon_years, result["total_ingelegd"], result["total_opgenomen"],
-            rendement, total_tax, end_value, config.start_capital, config.n_runs,
-            float(goal_amount), goal_label,
+        config = phases_to_config(
+            n_runs, start_capital, inflation_pct, st.session_state.phases, fiscaal_partner,
         )
-        render_tax_logic_expander(config, tax_mode)
-        render_scenario_panel()
+
+        with st.spinner("Berekenen…"):
+            result = cached_simulation(config)
+
+        p10, p50, p90, _, total_tax, end_values = _paths_for_tax_mode(result, tax_mode)
+        slagingskans, success_count = success_rate_goal(end_values, float(goal_amount))
+        end_value = float(p50[-1])
+        rendement = (
+            end_value - config.start_capital
+            - result["total_ingelegd"] + result["total_opgenomen"] + total_tax
+        )
+        goal_short = goal_label.strip() or "streefbedrag"
+
+        with main_col:
+            k1, k2, k3, k4, k5 = st.columns(5)
+            with k1:
+                st.markdown(kpi_card("Ingelegd", format_euro(result["total_ingelegd"])), unsafe_allow_html=True)
+            with k2:
+                st.markdown(kpi_card("Opgenomen", format_euro(result["total_opgenomen"])), unsafe_allow_html=True)
+            with k3:
+                st.markdown(kpi_card("Rendement", format_euro(rendement), "positive" if rendement >= 0 else "negative"), unsafe_allow_html=True)
+            with k4:
+                st.markdown(kpi_card("Box 3", format_euro(-total_tax), "negative"), unsafe_allow_html=True)
+            with k5:
+                st.markdown(
+                    kpi_card("Eindwaarde P50", format_euro(end_value), "positive" if end_value >= 0 else "negative"),
+                    unsafe_allow_html=True,
+                )
+
+            with st.container(border=True):
+                h1, h2 = st.columns([3, 1])
+                with h1:
+                    st.markdown("**Resultaten**")
+                    st.markdown(chart_legend_html(), unsafe_allow_html=True)
+                with h2:
+                    x_mode = st.radio("X-as", X_AXIS_MODES, horizontal=True, label_visibility="collapsed")
+
+                fig, chart_note = build_chart(result, config, tax_mode, x_mode, float(goal_amount))
+                st.plotly_chart(fig, use_container_width=True)
+                if chart_note:
+                    st.caption(chart_note)
+
+                rate_text = format_success_rate(slagingskans, success_count, config.n_runs)
+                st.markdown(
+                    f'<div class="success-rate">'
+                    f'<span style="color:{COLORS["muted"]};font-size:0.82rem">'
+                    f'Slagingskans ({goal_short} ≥ {format_euro(goal_amount, compact=False)})</span>'
+                    f'<div class="success-rate-value">{rate_text}</div>'
+                    f'<span style="color:{COLORS["muted"]};font-size:0.78rem">'
+                    f'{success_count:,} van {config.n_runs:,} runs halen het streefbedrag</span></div>',
+                    unsafe_allow_html=True,
+                )
+                st.caption(
+                    f"{result['start_year']}–{result['start_year'] + config.horizon_years - 1} · "
+                    f"P10 {format_euro(p10[-1])} · P50 {format_euro(p50[-1])} · P90 {format_euro(p90[-1])}"
+                )
+
+            render_explanation(
+                config.horizon_years, result["total_ingelegd"], result["total_opgenomen"],
+                rendement, total_tax, end_value, config.start_capital, config.n_runs,
+                float(goal_amount), goal_label,
+            )
+            render_tax_logic_expander(config, tax_mode)
+            render_scenario_panel()
+    except Exception as exc:
+        st.error("De app kon niet volledig laden. Controleer je invoer of herstart de pagina.")
+        st.exception(exc)
 
 
 if __name__ == "__main__":

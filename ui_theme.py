@@ -159,8 +159,23 @@ def inject_css() -> None:
         .success-rate-value {{ font-size: 1.35rem; font-weight: 700; }}
 
         .stButton > button[kind="primary"] {{
-            background: {COLORS["primary"]};
-            border-color: {COLORS["primary"]};
+            background: {COLORS["primary"]} !important;
+            border-color: {COLORS["primary"]} !important;
+            color: #ffffff !important;
+        }}
+
+        .stDownloadButton > button,
+        [data-testid="stDownloadButton"] button {{
+            background: {COLORS["primary"]} !important;
+            border-color: {COLORS["primary"]} !important;
+            color: #ffffff !important;
+        }}
+
+        .stDownloadButton > button:hover,
+        [data-testid="stDownloadButton"] button:hover {{
+            background: #1e3a8a !important;
+            border-color: #1e3a8a !important;
+            color: #ffffff !important;
         }}
         </style>
         """,
